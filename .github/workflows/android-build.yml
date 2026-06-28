@@ -1,4 +1,4 @@
-name: Build Avenelle Patch 01 APK
+name: Build Avenelle V5 APK
 
 on:
   workflow_dispatch:
@@ -8,63 +8,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Locate Patch 01 source ZIP
+      - name: Locate Avenelle V5 source ZIP
         run: |
           set -e
-          echo "Repository files:"
+          echo "Repo root:"
           ls -la
 
           ZIP_COUNT=$(ls Avenelle_PATCH01_ICON_ONLY_SOURCE_DO_NOT_EXTRACT*.zip 2>/dev/null | wc -l)
 
           if [ "$ZIP_COUNT" -ne 1 ]; then
-            echo "Expected exactly one Avenelle Patch 01 ZIP, found $ZIP_COUNT."
-            echo "Matching ZIP files:"
+            echo "Expected exactly one Avenelle source ZIP, found $ZIP_COUNT."
             ls -la Avenelle_PATCH01_ICON_ONLY_SOURCE_DO_NOT_EXTRACT*.zip || true
             exit 1
           fi
 
           ZIP_FILE=$(ls Avenelle_PATCH01_ICON_ONLY_SOURCE_DO_NOT_EXTRACT*.zip | head -n 1)
-          echo "PATCH_ZIP=$ZIP_FILE" >> $GITHUB_ENV
-          echo "Using Patch 01 source ZIP: $ZIP_FILE"
+          echo "AVENELLE_ZIP=$ZIP_FILE" >> $GITHUB_ENV
+          echo "Using ZIP: $ZIP_FILE"
 
       - name: Unzip Avenelle source
         run: |
           set -e
-          rm -rf extracted
-          unzip "$PATCH_ZIP" -d extracted
+          rm -rf avenelle_source
+          mkdir avenelle_source
+          unzip "$AVENELLE_ZIP" -d avenelle_source
 
-          echo "Extracted preview:"
-          find extracted -maxdepth 4 -type f | sort | head -200
+          echo "Extracted files:"
+          find avenelle_source -maxdepth 3 -type f | sort | head -200
 
-      - name: Locate Android project
-        run: |
-          set -e
-          PROJECT_DIR=$(find extracted -name settings.gradle -exec dirname {} \; | head -n 1)
+          test -f avenelle_source/pubspec.yaml
+          test -f avenelle_source/lib/main.dart
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "No Android project found. settings.gradle missing."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "Android project found at: $PROJECT_DIR"
-
-      - name: Verify required Android files
-        run: |
-          set -e
-          test -f "$PROJECT_DIR/settings.gradle"
-          test -f "$PROJECT_DIR/build.gradle"
-          test -f "$PROJECT_DIR/app/build.gradle"
-
-          if [ ! -d "$PROJECT_DIR/app/src/main" ]; then
-            echo "Missing app/src/main folder."
-            exit 1
-          fi
-
-          echo "Required Android files found."
+          echo "Avenelle Flutter source confirmed."
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -72,19 +50,63 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
         with:
-          gradle-version: 8.9
+          channel: stable
+          flutter-version: '3.24.5'
+          cache: true
+
+      - name: Rebuild Android platform shell
+        run: |
+          set -e
+          cd avenelle_source
+          flutter --version
+          flutter create . --platforms=android --project-name avenelle
+
+      - name: Apply launcher icon patch
+        run: |
+          set -e
+          cd avenelle_source
+
+          if [ -d "v5_android_icon_patch/res" ]; then
+            cp -R v5_android_icon_patch/res/* android/app/src/main/res/
+            echo "Icon patch applied."
+          else
+            echo "No icon patch folder found. Continuing without icon patch."
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          text = manifest.read_text()
+
+          text = text.replace('android:label="avenelle"', 'android:label="Avenelle"')
+
+          if 'android:roundIcon=' not in text:
+              text = text.replace(
+                  'android:icon="@mipmap/ic_launcher"',
+                  'android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"'
+              )
+
+          manifest.write_text(text)
+          PY
+
+      - name: Flutter pub get
+        run: |
+          set -e
+          cd avenelle_source
+          flutter pub get
 
       - name: Build debug APK
         run: |
           set -e
-          cd "$PROJECT_DIR"
-          gradle :app:assembleDebug --stacktrace
+          cd avenelle_source
+          flutter build apk --debug
 
-      - name: Upload APK artifact
+      - name: Upload Avenelle APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Avenelle-Patch01-APK
-          path: extracted/**/app/build/outputs/apk/debug/*.apk
+          name: Avenelle-V5-APK
+          path: avenelle_source/build/app/outputs/flutter-apk/app-debug.apk
