@@ -1,0 +1,132 @@
+name: Build Avenelle APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Locate Patch 01 source ZIP
+        id: locate
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE="Avenelle_PATCH01_ICON_ONLY_SOURCE_DO_NOT_EXTRACT.zip"
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "Missing $ZIP_FILE in repo root." >&2
+            echo "Upload the Patch 01 source ZIP to the root of this repo, do not extract it." >&2
+            exit 1
+          fi
+          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+          echo "Using exact source ZIP: $ZIP_FILE"
+
+      - name: Unpack source safely
+        shell: bash
+        run: |
+          set -e
+          rm -rf avenelle_build
+          mkdir avenelle_build
+          unzip -q "${{ steps.locate.outputs.zip }}" -d avenelle_build
+          echo "Source unpacked. Important files found:"
+          find avenelle_build -maxdepth 4 -type f | sort | sed -n '1,120p'
+
+      - name: Select Flutter project safely
+        id: project
+        shell: bash
+        run: |
+          set -e
+          PROJECT_DIR="$(find avenelle_build -name pubspec.yaml -type f -exec dirname {} \; | sort | head -n 1)"
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "No pubspec.yaml found after unpacking source ZIP." >&2
+            exit 1
+          fi
+          if [ ! -f "$PROJECT_DIR/lib/main.dart" ]; then
+            echo "pubspec.yaml found, but lib/main.dart is missing." >&2
+            exit 1
+          fi
+          if [ ! -d "$PROJECT_DIR/v5_android_icon_patch/res" ]; then
+            echo "Icon patch folder missing from source ZIP." >&2
+            exit 1
+          fi
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Flutter project: $PROJECT_DIR"
+
+      - name: Set up Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Rebuild Android platform shell
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+          rm -rf android
+          flutter create --platforms=android .
+
+      - name: Apply launcher icon only patch
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+          cp -R v5_android_icon_patch/res/* android/app/src/main/res/
+          python3 - <<'PY'
+          from pathlib import Path
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          text = text.replace('android:label="avenelle"', 'android:label="Avenelle"')
+          text = text.replace('android:icon="@mipmap/ic_launcher"', 'android:icon="@mipmap/ic_launcher"')
+          if 'android:roundIcon=' not in text:
+              text = text.replace('android:icon="@mipmap/ic_launcher"', 'android:icon="@mipmap/ic_launcher"\n        android:roundIcon="@mipmap/ic_launcher_round"')
+          manifest.write_text(text)
+          PY
+          echo "Patch 01 copied Avenelle launcher icons into Android resources."
+          echo "Expected source icon SHA256:"
+          sha256sum v5_android_icon_patch/res/mipmap-xxxhdpi/ic_launcher.png
+
+      - name: Flutter pub get
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: flutter pub get
+
+      - name: Build debug APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: flutter build apk --debug --no-tree-shake-icons
+
+      - name: Verify APK launcher icon is patched
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          set -e
+          APK="build/app/outputs/flutter-apk/app-debug.apk"
+          if [ ! -f "$APK" ]; then
+            echo "APK was not created." >&2
+            exit 1
+          fi
+          rm -rf /tmp/avenelle_apk_icon_check
+          mkdir -p /tmp/avenelle_apk_icon_check
+          unzip -p "$APK" res/mipmap-xxxhdpi-v4/ic_launcher.png > /tmp/avenelle_apk_icon_check/apk_ic_launcher.png
+          echo "Expected icon SHA256:"
+          sha256sum v5_android_icon_patch/res/mipmap-xxxhdpi/ic_launcher.png
+          echo "APK icon SHA256:"
+          sha256sum /tmp/avenelle_apk_icon_check/apk_ic_launcher.png
+          if ! cmp -s v5_android_icon_patch/res/mipmap-xxxhdpi/ic_launcher.png /tmp/avenelle_apk_icon_check/apk_ic_launcher.png; then
+            echo "Launcher icon verification failed. APK still does not contain the Avenelle Patch 01 launcher icon." >&2
+            exit 1
+          fi
+          echo "Launcher icon verification passed. APK contains the Avenelle Patch 01 launcher icon."
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: avenelle-patch01-icononly-debug-apk
+          path: ${{ steps.project.outputs.dir }}/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
